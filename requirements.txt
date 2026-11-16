@@ -1,0 +1,22 @@
+
+# Backend - FastAPI
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+pydantic
+PyJWT
+pwdlib[argon2]
+python-dotenv
+cryptography
+python-multipart
+
+# Computer Vision - YOLO
+ultralytics==8.4.207
+opencv-python
+
+# MQTT
+paho-mqtt
+
+# HTTP / Telegram
+requests
