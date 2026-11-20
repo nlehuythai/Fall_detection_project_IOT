@@ -50,6 +50,21 @@ export const cameraService = {
         );
         return response.data;
     },
+    // Start camera monitoring
+    startMonitoring: async (householdId, cameraId) => {
+        const response = await api.post(
+            `/households/${householdId}/cameras/${cameraId}/start`
+        );
+        return response.data;
+    },
+
+    // Stop camera monitoring
+    stopMonitoring: async (householdId, cameraId) => {
+        const response = await api.post(
+            `/households/${householdId}/cameras/${cameraId}/stop`
+        );
+        return response.data;
+    },
 };
 
 export default cameraService;

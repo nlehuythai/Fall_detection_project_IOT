@@ -5,7 +5,12 @@ from sqlalchemy.exc import IntegrityError
 
 from src.backend.db import get_db
 from src.backend.models import User
-from src.backend.schemas import UserCreate, UserResponse
+from src.backend.schemas import (
+    UserCreate,
+    UserResponse,
+    UserUpdate,
+    PasswordChange
+)
 from src.backend.security import hash_password
 from fastapi.security import OAuth2PasswordRequestForm
 from src.backend.security import verify_password, create_access_token
@@ -96,3 +101,46 @@ def login(
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+@router.patch("/me", response_model=UserResponse)
+def update_profile(
+    user_data: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    current_user.full_name = user_data.full_name.strip()
+
+    db.commit()
+    db.refresh(current_user)
+
+    return current_user
+
+
+@router.patch("/me/password")
+def change_password(
+    password_data: PasswordChange,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(
+        password_data.current_password,
+        current_user.password_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+
+    if password_data.current_password == password_data.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different"
+        )
+
+    current_user.password_hash = hash_password(
+        password_data.new_password
+    )
+
+    db.commit()
+
+    return {"message": "Password changed successfully"}

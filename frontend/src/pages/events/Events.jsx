@@ -26,7 +26,10 @@ function Events() {
     const [selectedEvent, setSelectedEvent] = useState(null);
     const [refreshing, setRefreshing] = useState(false);
     const [acknowledging, setAcknowledging] = useState(false);
+    const [resolving, setResolving] = useState(false);
     const [filter, setFilter] = useState("all");
+    const [currentPage, setCurrentPage] = useState(1);
+    const PAGE_SIZE = 10;
 
     const [snapshotUrl, setSnapshotUrl] = useState(null);
     const [snapshotLoading, setSnapshotLoading] = useState(false);
@@ -214,6 +217,56 @@ function Events() {
         }
     };
 
+    // Resolve fall event
+    const handleResolve = async (event) => {
+        if (event.processing_status === "resolved") return;
+
+        try {
+            setResolving(true);
+            setError("");
+
+            const data = await eventService.resolve(
+                householdId,
+                event.id
+            );
+
+            setEvents((previousEvents) =>
+                previousEvents.map((item) =>
+                    item.id === event.id
+                        ? {
+                            ...item,
+                            processing_status: data.processing_status,
+                            resolved_at: data.resolved_at,
+                        }
+                        : item
+                )
+            );
+
+            if (selectedEvent?.id === event.id) {
+                setSelectedEvent((previous) => ({
+                    ...previous,
+                    processing_status: data.processing_status,
+                    resolved_at: data.resolved_at,
+                }));
+            }
+        } catch (err) {
+            console.error("Resolve event error:", err);
+
+            setError(
+                err.response?.data?.detail ||
+                "Không thể cập nhật trạng thái xử lý sự kiện."
+            );
+        } finally {
+            setResolving(false);
+        }
+    };
+    const unresolvedCount = events.filter(
+        (event) => event.processing_status === "pending"
+    ).length;
+
+    const resolvedCount = events.filter(
+        (event) => event.processing_status === "resolved"
+    ).length;
     // Filter events
     const filteredEvents = events.filter((event) => {
         if (filter === "pending") {
@@ -223,7 +276,9 @@ function Events() {
         if (filter === "acknowledged") {
             return event.acknowledged;
         }
-
+        if (filter === "resolved") {
+            return event.processing_status === "resolved";
+        }
         return true;
     });
 
@@ -231,6 +286,20 @@ function Events() {
     const sortedEvents = [...filteredEvents].sort(
         (a, b) =>
             new Date(b.occurred_at) - new Date(a.occurred_at)
+    );
+    // Pagination
+    const totalPages = Math.ceil(sortedEvents.length / PAGE_SIZE);
+
+    const safeCurrentPage = Math.min(
+        currentPage,
+        Math.max(totalPages, 1)
+    );
+
+    const startIndex = (safeCurrentPage - 1) * PAGE_SIZE;
+
+    const paginatedEvents = sortedEvents.slice(
+        startIndex,
+        startIndex + PAGE_SIZE
     );
     const getCameraName = (cameraId) => {
         const camera = cameras.find(
@@ -276,57 +345,78 @@ function Events() {
             )}
 
             {/* Statistics */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
 
+                {/* Tổng sự kiện */}
                 <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm text-slate-500">
-                                Tổng sự kiện
-                            </p>
-
+                            <p className="text-sm text-slate-500">Tổng sự kiện</p>
                             <h3 className="mt-2 text-3xl font-bold text-slate-900">
                                 {totalEvents}
                             </h3>
                         </div>
-
                         <div className="rounded-xl bg-blue-50 p-3 text-blue-600">
                             <Activity size={24} />
                         </div>
                     </div>
                 </div>
 
+                {/* Chưa xác nhận */}
                 <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm text-slate-500">
-                                Chưa xác nhận
-                            </p>
-
+                            <p className="text-sm text-slate-500">Chưa xác nhận</p>
                             <h3 className="mt-2 text-3xl font-bold text-red-600">
                                 {pendingEvents}
                             </h3>
                         </div>
-
                         <div className="rounded-xl bg-red-50 p-3 text-red-600">
                             <AlertTriangle size={24} />
                         </div>
                     </div>
                 </div>
 
+                {/* Đã xác nhận */}
                 <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm text-slate-500">
-                                Đã xác nhận
-                            </p>
-
+                            <p className="text-sm text-slate-500">Đã xác nhận</p>
                             <h3 className="mt-2 text-3xl font-bold text-green-600">
                                 {acknowledgedEvents}
                             </h3>
                         </div>
-
                         <div className="rounded-xl bg-green-50 p-3 text-green-600">
+                            <CheckCircle size={24} />
+                        </div>
+                    </div>
+                </div>
+
+                {/* Chưa xử lý */}
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <p className="text-sm text-slate-500">Chưa xử lý</p>
+                            <h3 className="mt-2 text-3xl font-bold text-orange-600">
+                                {unresolvedCount}
+                            </h3>
+                        </div>
+                        <div className="rounded-xl bg-orange-50 p-3 text-orange-600">
+                            <Clock size={24} />
+                        </div>
+                    </div>
+                </div>
+
+                {/* Đã xử lý */}
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <p className="text-sm text-slate-500">Đã xử lý</p>
+                            <h3 className="mt-2 text-3xl font-bold text-emerald-600">
+                                {resolvedCount}
+                            </h3>
+                        </div>
+                        <div className="rounded-xl bg-emerald-50 p-3 text-emerald-600">
                             <CheckCircle size={24} />
                         </div>
                     </div>
@@ -356,6 +446,8 @@ function Events() {
                         <option value="all">Tất cả sự kiện</option>
                         <option value="pending">Chưa xác nhận</option>
                         <option value="acknowledged">Đã xác nhận</option>
+                        <option value="unresolved">Chưa xử lý</option>
+                        <option value="resolved">Đã xử lý</option>
                     </select>
                 </div>
 
@@ -409,7 +501,7 @@ function Events() {
 
                             <tbody className="divide-y divide-slate-100">
 
-                                {sortedEvents.map((event) => (
+                                {paginatedEvents.map((event) => (
                                     <tr
                                         key={event.id}
                                         className="hover:bg-slate-50"
@@ -486,7 +578,40 @@ function Events() {
                             </tbody>
                         </table>
                     </div>
+
+
                 )}
+                <div className="flex flex-col gap-3 border-t border-slate-100 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm text-slate-500">
+                        Hiển thị {startIndex + 1} -{" "}
+                        {Math.min(startIndex + PAGE_SIZE, sortedEvents.length)}{" "}
+                        trong tổng số {sortedEvents.length} sự kiện
+                    </p>
+
+                    <div className="flex items-center justify-end gap-2">
+                        <button
+                            type="button"
+                            onClick={() => setCurrentPage((prev) => prev - 1)}
+                            disabled={safeCurrentPage === 1}
+                            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                            Trang trước
+                        </button>
+
+                        <span className="px-2 text-sm font-medium text-slate-700">
+                            Trang {safeCurrentPage} / {Math.max(totalPages, 1)}
+                        </span>
+
+                        <button
+                            type="button"
+                            onClick={() => setCurrentPage((prev) => prev + 1)}
+                            disabled={safeCurrentPage >= totalPages}
+                            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                            Trang sau
+                        </button>
+                    </div>
+                </div>
 
             </div>
 
@@ -596,71 +721,88 @@ function Events() {
                             </div>
                         </div>
 
+
                         {/* Processing Status */}
                         <div className="mt-6">
                             <h3 className="font-semibold text-slate-900">
                                 Trạng thái xử lý
                             </h3>
-                            {/* Event Snapshot */}
-                            {/* Event Snapshot */}
-                            <div className="mt-6">
-                                <h3 className="font-semibold text-slate-900">
-                                    Ảnh tại thời điểm phát hiện
-                                </h3>
 
-                                <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-4">
-                                    {snapshotLoading ? (
-                                        <div className="flex flex-col items-center py-8">
-                                            <RefreshCw className="animate-spin text-blue-500" size={30} />
-                                            <p className="mt-3 text-sm text-slate-500">
-                                                Đang tải ảnh...
+                            <div className="mt-3 rounded-xl border border-slate-200 p-4">
+                                {selectedEvent.processing_status === "resolved" ? (
+                                    <div className="flex items-center gap-3">
+                                        <CheckCircle className="text-green-600" size={22} />
+
+                                        <div>
+                                            <p className="text-sm font-semibold text-green-700">
+                                                Đã xử lý
+                                            </p>
+
+                                            <p className="mt-1 text-xs text-slate-500">
+                                                Sự kiện đã được thành viên hộ gia đình xử lý.
+                                            </p>
+
+                                            <p className="mt-1 text-xs text-slate-500">
+                                                Thời gian xử lý: {formatDate(selectedEvent.resolved_at)}
                                             </p>
                                         </div>
-                                    ) : snapshotUrl ? (
-                                        <img
-                                            src={snapshotUrl}
-                                            alt="Ảnh tại thời điểm phát hiện té ngã"
-                                            className="mx-auto max-h-[400px] w-full rounded-lg object-contain"
-                                        />
-                                    ) : snapshotError ? (
-                                        <div className="py-8 text-center">
-                                            <Camera size={36} className="mx-auto text-slate-300" />
-                                            <p className="mt-3 text-sm text-red-500">
-                                                {snapshotError}
-                                            </p>
-                                        </div>
-                                    ) : (
-                                        <div className="flex flex-col items-center py-8 text-center">
-                                            <Camera size={36} className="text-slate-300" />
-                                            <p className="mt-3 text-sm font-medium text-slate-600">
-                                                Chưa có ảnh sự kiện
-                                            </p>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-200 p-4">
-                                {selectedEvent.acknowledged ? (
-                                    <CheckCircle className="text-green-600" size={22} />
+                                    </div>
                                 ) : (
-                                    <Clock className="text-orange-500" size={22} />
+                                    <div className="flex items-center gap-3">
+                                        <Clock className="text-orange-500" size={22} />
+
+                                        <div>
+                                            <p className="text-sm font-semibold text-orange-600">
+                                                Chưa xử lý
+                                            </p>
+
+                                            <p className="mt-1 text-xs text-slate-500">
+                                                Vui lòng kiểm tra tình trạng người được giám sát.
+                                            </p>
+                                        </div>
+                                    </div>
                                 )}
-
-                                <div>
-                                    <p className="text-sm font-semibold text-slate-800">
-                                        {selectedEvent.acknowledged
-                                            ? "Sự kiện đã được xác nhận"
-                                            : "Sự kiện đang chờ xác nhận"}
-                                    </p>
-
-                                    <p className="mt-1 text-xs text-slate-500">
-                                        {selectedEvent.acknowledged
-                                            ? "Người dùng đã xác nhận sự kiện."
-                                            : "Vui lòng kiểm tra tình trạng người được giám sát."}
-                                    </p>
-                                </div>
                             </div>
                         </div>
+
+                        {/* Event Snapshot */}
+                        <div className="mt-6">
+                            <h3 className="font-semibold text-slate-900">
+                                Ảnh tại thời điểm phát hiện
+                            </h3>
+
+                            <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-4">
+                                {snapshotLoading ? (
+                                    <div className="flex flex-col items-center py-8">
+                                        <RefreshCw className="animate-spin text-blue-500" size={30} />
+                                        <p className="mt-3 text-sm text-slate-500">
+                                            Đang tải ảnh...
+                                        </p>
+                                    </div>
+                                ) : snapshotUrl ? (
+                                    <img
+                                        src={snapshotUrl}
+                                        alt="Ảnh tại thời điểm phát hiện té ngã"
+                                        className="mx-auto max-h-[400px] w-full rounded-lg object-contain"
+                                    />
+                                ) : snapshotError ? (
+                                    <div className="py-8 text-center">
+                                        <Camera size={36} className="mx-auto text-slate-300" />
+                                        <p className="mt-3 text-sm text-red-500">
+                                            {snapshotError}
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center py-8 text-center">
+                                        <Camera size={36} className="text-slate-300" />
+                                        <p className="mt-3 text-sm font-medium text-slate-600">
+                                            Chưa có ảnh sự kiện
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
 
                         {/* Event ID */}
                         <div className="mt-6">
@@ -673,8 +815,9 @@ function Events() {
                             </p>
                         </div>
 
+
                         {/* Actions */}
-                        <div className="mt-6 flex justify-end gap-3 border-t border-slate-100 pt-4">
+                        <div className="mt-6 flex flex-wrap justify-end gap-3 border-t border-slate-100 pt-4">
 
                             <button
                                 onClick={() => {
@@ -699,8 +842,20 @@ function Events() {
                                     className="rounded-xl bg-green-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
                                 >
                                     {acknowledging
-                                        ? "Đang xử lý..."
-                                        : "Xác nhận đã xử lý"}
+                                        ? "Đang xác nhận..."
+                                        : "Xác nhận cảnh báo"}
+                                </button>
+                            )}
+
+                            {selectedEvent.processing_status !== "resolved" && (
+                                <button
+                                    onClick={() => handleResolve(selectedEvent)}
+                                    disabled={resolving}
+                                    className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                >
+                                    {resolving
+                                        ? "Đang cập nhật..."
+                                        : "Đánh dấu đã xử lý"}
                                 </button>
                             )}
 

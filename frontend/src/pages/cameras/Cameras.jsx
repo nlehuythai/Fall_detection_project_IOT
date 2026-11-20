@@ -11,11 +11,14 @@ import {
     X,
     Copy,
     Check,
+    Eye,
+    Play,
+    Square,
 } from "lucide-react";
 
 import { useHousehold } from "../../contexts/HouseholdContext";
 import cameraService from "../../services/cameraService";
-
+import LiveView from "../../components/LiveView";
 function Cameras() {
     const { householdId, loading: householdLoading } = useHousehold();
 
@@ -26,6 +29,10 @@ function Cameras() {
     const [showAddModal, setShowAddModal] = useState(false);
     const [deviceId, setDeviceId] = useState("");
     const [cameraName, setCameraName] = useState("");
+    const [streamUrl, setStreamUrl] = useState("");
+    const [viewingCamera, setViewingCamera] = useState(null);
+    const [streamStatus, setStreamStatus] = useState("idle");
+    const [streamReloadKey, setStreamReloadKey] = useState(0);
     const [submitting, setSubmitting] = useState(false);
     const [createdCamera, setCreatedCamera] = useState(null);
     const [copied, setCopied] = useState(false);
@@ -34,7 +41,9 @@ function Cameras() {
     const [editingCamera, setEditingCamera] = useState(null);
     const [editDeviceId, setEditDeviceId] = useState("");
     const [editCameraName, setEditCameraName] = useState("");
+    const [editStreamUrl, setEditStreamUrl] = useState("");
     const [updating, setUpdating] = useState(false);
+    const [monitoringCameraId, setMonitoringCameraId] = useState(null);
     const fetchCameras = async () => {
         if (!householdId) {
             setCameras([]);
@@ -93,12 +102,13 @@ function Cameras() {
             const data = await cameraService.create(householdId, {
                 device_id: deviceId.trim(),
                 camera_name: cameraName.trim(),
+                stream_url: streamUrl.trim() || null,
             });
 
             setCreatedCamera(data);
             setDeviceId("");
             setCameraName("");
-
+            setStreamUrl("");
             await fetchCameras();
         } catch (err) {
             console.error("Create camera error:", err);
@@ -124,6 +134,7 @@ function Cameras() {
         setEditingCamera(camera);
         setEditDeviceId(camera.device_id);
         setEditCameraName(camera.camera_name);
+        setEditStreamUrl(camera.stream_url || "");
         setShowEditModal(true);
         setError("");
     };
@@ -143,6 +154,7 @@ function Cameras() {
                 {
                     device_id: editDeviceId.trim(),
                     camera_name: editCameraName.trim(),
+                    stream_url: editStreamUrl.trim() || null,
                 }
             );
 
@@ -185,6 +197,64 @@ function Cameras() {
                 "Không thể xóa camera."
             );
         }
+    };
+    const handleToggleMonitoring = async (camera) => {
+        const isMonitoring = camera.monitoring_enabled;
+
+        const confirmed = window.confirm(
+            isMonitoring
+                ? `Bạn có chắc chắn muốn tắt giám sát camera "${camera.camera_name}" không?`
+                : `Bạn có chắc chắn muốn bật giám sát camera "${camera.camera_name}" không?`
+        );
+
+        if (!confirmed) return;
+
+        try {
+            setError("");
+            setMonitoringCameraId(camera.id);
+
+            if (isMonitoring) {
+                await cameraService.stopMonitoring(
+                    householdId,
+                    camera.id
+                );
+            } else {
+                await cameraService.startMonitoring(
+                    householdId,
+                    camera.id
+                );
+            }
+
+            await fetchCameras();
+
+        } catch (err) {
+            console.error("Toggle monitoring error:", err);
+
+            setError(
+                err.response?.data?.detail ||
+                "Không thể thay đổi trạng thái giám sát camera."
+            );
+
+        } finally {
+            setMonitoringCameraId(null);
+        }
+    };
+    // Mở luồng video
+    const openLiveCamera = (camera) => {
+        setStreamStatus("connecting");
+        setStreamReloadKey((prev) => prev + 1);
+        setViewingCamera(camera);
+    };
+
+    // Tải lại luồng video
+    const reloadStream = () => {
+        setStreamStatus("connecting");
+        setStreamReloadKey((prev) => prev + 1);
+    };
+
+    const closeLiveCamera = () => {
+        setViewingCamera(null);
+        setStreamStatus("idle");
     };
     return (
         <div className="space-y-6">
@@ -275,6 +345,9 @@ function Cameras() {
                                     <th className="px-6 py-4 font-medium">Tên camera</th>
                                     <th className="px-6 py-4 font-medium">Mã thiết bị</th>
                                     <th className="px-6 py-4 font-medium">Trạng thái</th>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">
+                                        Giám sát
+                                    </th>
                                     <th className="px-6 py-4 text-right font-medium">
                                         Thao tác
                                     </th>
@@ -305,9 +378,51 @@ function Cameras() {
                                                 </span>
                                             )}
                                         </td>
-
+                                        <td className="px-6 py-4">
+                                            {camera.monitoring_enabled ? (
+                                                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600">
+                                                    <Play size={12} />
+                                                    Đang bật
+                                                </span>
+                                            ) : (
+                                                <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+                                                    <Square size={12} />
+                                                    Đang tắt
+                                                </span>
+                                            )}
+                                        </td>
                                         <td className="px-6 py-4 text-right">
                                             <div className="flex items-center justify-end gap-2">
+                                                <button
+                                                    onClick={() => handleToggleMonitoring(camera)}
+                                                    disabled={monitoringCameraId === camera.id}
+                                                    className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 ${camera.monitoring_enabled
+                                                        ? "border-red-200 text-red-600 hover:bg-red-50"
+                                                        : "border-emerald-200 text-emerald-600 hover:bg-emerald-50"
+                                                        }`}
+                                                >
+                                                    {monitoringCameraId === camera.id ? (
+                                                        <RefreshCw size={14} className="animate-spin" />
+                                                    ) : camera.monitoring_enabled ? (
+                                                        <Square size={14} />
+                                                    ) : (
+                                                        <Play size={14} />
+                                                    )}
+
+                                                    {monitoringCameraId === camera.id
+                                                        ? "Đang xử lý..."
+                                                        : camera.monitoring_enabled
+                                                            ? "Tắt giám sát"
+                                                            : "Bật giám sát"}
+                                                </button>
+                                                <button
+                                                    onClick={() => openLiveCamera(camera)}
+                                                    disabled={!camera.stream_url}
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                                >
+                                                    <Eye size={14} />
+                                                    Xem trực tiếp
+                                                </button>
                                                 <button
                                                     onClick={() => openEditModal(camera)}
                                                     className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100"
@@ -332,7 +447,85 @@ function Cameras() {
                     </div>
                 </div>
             )}
+            {/* Live Camera Modal */}
+            {viewingCamera && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
+                    <div className="w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-xl">
 
+                        {/* Header */}
+                        <div className="flex items-center justify-between border-b border-slate-200 p-5">
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-900">
+                                    {viewingCamera.camera_name}
+                                </h2>
+
+                                <p className="mt-1 text-xs text-slate-500">
+                                    {viewingCamera.device_id}
+                                </p>
+                            </div>
+
+                            <button
+                                onClick={closeLiveCamera}
+                                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100"
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        {/* Video */}
+                        <div className="relative bg-black p-2">
+                            <LiveView
+                                householdId={householdId}
+                                cameraId={viewingCamera.id}
+                                reloadKey={streamReloadKey}
+                                onStatusChange={setStreamStatus}
+                            />
+
+                            {streamStatus === "connecting" && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+                                    <p className="text-sm text-white">
+                                        Đang kết nối camera...
+                                    </p>
+                                </div>
+                            )}
+
+                            {streamStatus === "error" && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80">
+                                    <WifiOff size={32} className="text-red-400" />
+                                    <p className="text-sm text-white">
+                                        Không thể nhận luồng video
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="flex items-center justify-between p-4">
+                            <p className="text-xs text-slate-500">
+                                Luồng video ESP32-CAM
+                            </p>
+
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={reloadStream}
+                                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                                >
+                                    <RefreshCw size={15} />
+                                    Tải lại luồng
+                                </button>
+
+                                <button
+                                    onClick={closeLiveCamera}
+                                    className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
+                                >
+                                    Đóng
+                                </button>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            )}
             {/* Add Camera Modal */}
             {showAddModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -402,6 +595,24 @@ function Cameras() {
                                         required
                                         className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                                     />
+                                </div>
+                                <div>
+                                    <label className="mb-2 block text-sm font-medium text-slate-700">
+                                        Địa chỉ luồng video (Stream URL)
+                                    </label>
+
+                                    <input
+                                        type="url"
+                                        value={streamUrl}
+                                        onChange={(e) => setStreamUrl(e.target.value)}
+                                        placeholder="http://192.168.1.106:81/stream"
+                                        maxLength={500}
+                                        className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                    />
+
+                                    <p className="mt-1 text-xs text-slate-400">
+                                        Địa chỉ video trực tiếp từ ESP32-CAM. Có thể để trống nếu chưa cấu hình.
+                                    </p>
                                 </div>
 
                                 {error && (
@@ -555,6 +766,24 @@ function Cameras() {
                                     required
                                     className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-500"
                                 />
+                            </div>
+                            <div>
+                                <label className="mb-2 block text-sm font-medium text-slate-700">
+                                    Địa chỉ luồng video (Stream URL)
+                                </label>
+
+                                <input
+                                    type="url"
+                                    value={editStreamUrl}
+                                    onChange={(e) => setEditStreamUrl(e.target.value)}
+                                    placeholder="http://192.168.1.106:81/stream"
+                                    maxLength={500}
+                                    className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                />
+
+                                <p className="mt-1 text-xs text-slate-400">
+                                    Để trống nếu không muốn sử dụng luồng video.
+                                </p>
                             </div>
 
                             {error && (

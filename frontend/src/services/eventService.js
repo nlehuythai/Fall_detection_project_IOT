@@ -1,3 +1,4 @@
+
 import api from "./api";
 
 export const eventService = {
@@ -21,6 +22,14 @@ export const eventService = {
     acknowledge: async (householdId, eventId) => {
         const response = await api.patch(
             `/households/${householdId}/events/${eventId}/acknowledge`
+        );
+        return response.data;
+    },
+
+    // Resolve fall event
+    resolve: async (householdId, eventId) => {
+        const response = await api.patch(
+            `/households/${householdId}/events/${eventId}/resolve`
         );
         return response.data;
     },

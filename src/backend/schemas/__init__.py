@@ -1,7 +1,9 @@
 from src.backend.schemas.user import (
     UserCreate,
     UserLogin,
-    UserResponse
+    UserResponse,
+    UserUpdate,
+    PasswordChange
 )
 
 from src.backend.schemas.household import (

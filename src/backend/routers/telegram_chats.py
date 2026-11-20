@@ -11,8 +11,8 @@ from src.backend.dependencies import get_current_user
 
 from src.backend.models.user import User
 from src.backend.models.household_member import HouseholdMember
-from src.backend.models.household_telegram_bot import HouseholdTelegramBot
 from src.backend.models.household_telegram_chat import HouseholdTelegramChat
+from src.backend.telegram_config import TELEGRAM_BOT_USERNAME
 
 from src.backend.schemas.telegram_chat import TelegramLinkCodeResponse
 
@@ -35,24 +35,17 @@ def create_telegram_link_code(
         HouseholdMember.household_id == household_id,
         HouseholdMember.user_id == current_user.id
     ).first()
-
     if membership is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Household not found"
         )
-
-    # 2. Lấy Telegram Bot của hộ gia đình
-    bot = db.query(HouseholdTelegramBot).filter(
-        HouseholdTelegramBot.household_id == household_id,
-        HouseholdTelegramBot.is_active == True
-    ).first()
-
-    if bot is None:
+    if not TELEGRAM_BOT_USERNAME:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Telegram Bot has not been connected"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Shared Telegram Bot username is not configured"
         )
+
 
     # 3. Tạo mã liên kết ngẫu nhiên
     link_code = secrets.token_urlsafe(24)
@@ -98,7 +91,78 @@ def create_telegram_link_code(
 
     # 7. Trả mã liên kết cho Website
     return TelegramLinkCodeResponse(
-        link_code=link_code,
-        expires_at=expires_at,
-        bot_username=bot.bot_username
-    )
+    link_code=link_code,
+    expires_at=expires_at,
+    bot_username=TELEGRAM_BOT_USERNAME
+)
+
+# Lấy trạng thái liên kết Telegram của thành viên hiện tại
+@router.get("/{household_id}/telegram-status")
+def get_telegram_status(
+    household_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    membership = db.query(HouseholdMember).filter(
+        HouseholdMember.household_id == household_id,
+        HouseholdMember.user_id == current_user.id
+    ).first()
+
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Household not found"
+        )
+
+    telegram_chat = db.query(HouseholdTelegramChat).filter(
+        HouseholdTelegramChat.household_id == household_id,
+        HouseholdTelegramChat.user_id == current_user.id
+    ).first()
+
+    if telegram_chat is None:
+        return {
+            "is_linked": False,
+            "linked_at": None
+        }
+
+    return {
+        "is_linked": telegram_chat.telegram_chat_id is not None,
+        "linked_at": telegram_chat.linked_at
+    }
+
+
+# Hủy liên kết Telegram của thành viên hiện tại
+@router.delete("/{household_id}/telegram-link")
+def disconnect_telegram(
+    household_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    membership = db.query(HouseholdMember).filter(
+        HouseholdMember.household_id == household_id,
+        HouseholdMember.user_id == current_user.id
+    ).first()
+
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Household not found"
+        )
+
+    telegram_chat = db.query(HouseholdTelegramChat).filter(
+        HouseholdTelegramChat.household_id == household_id,
+        HouseholdTelegramChat.user_id == current_user.id
+    ).first()
+
+    if telegram_chat is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Telegram account is not linked"
+        )
+
+    db.delete(telegram_chat)
+    db.commit()
+
+    return {
+        "message": "Telegram account disconnected successfully"
+    }

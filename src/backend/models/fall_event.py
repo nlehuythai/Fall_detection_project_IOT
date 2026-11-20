@@ -66,7 +66,17 @@ class FallEvent(Base):
         default=False,
         server_default="false"
     )
+    processing_status = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default="pending"
+    )
 
+    resolved_at = Column(
+        DateTime(timezone=True),
+        nullable=True
+    )
     raw_payload = Column(
         JSONB,
         nullable=True

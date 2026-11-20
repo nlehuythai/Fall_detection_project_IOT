@@ -28,4 +28,18 @@ export const authService = {
         const response = await api.get("/auth/me");
         return response.data;
     },
+    // Update profile
+    updateProfile: async (userData) => {
+        const response = await api.patch("/auth/me", userData);
+        return response.data;
+    },
+
+    // Change password
+    changePassword: async (passwordData) => {
+        const response = await api.patch(
+            "/auth/me/password",
+            passwordData
+        );
+        return response.data;
+    },
 };

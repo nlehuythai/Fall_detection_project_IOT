@@ -63,18 +63,25 @@ export const householdService = {
         );
         return response.data;
     },
-    // Get Telegram Bot configuration of household
-    getTelegramBot: async (householdId) => {
-        const response = await api.get(
-            `/households/${householdId}/telegram-bot`
-        );
-        return response.data;
-    },
-
     // Generate Telegram linking code
     createTelegramLinkCode: async (householdId) => {
         const response = await api.post(
             `/households/${householdId}/telegram-link-code`
+        );
+        return response.data;
+    },
+    // Get Telegram linking status
+    getTelegramStatus: async (householdId) => {
+        const response = await api.get(
+            `/households/${householdId}/telegram-status`
+        );
+        return response.data;
+    },
+
+    // Disconnect Telegram account
+    disconnectTelegram: async (householdId) => {
+        const response = await api.delete(
+            `/households/${householdId}/telegram-link`
         );
         return response.data;
     },

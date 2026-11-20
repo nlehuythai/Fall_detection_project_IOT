@@ -11,8 +11,10 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
+
 
 # --------------------------------------------------
 # Project path and backend imports
@@ -24,100 +26,92 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 load_dotenv(ROOT_DIR / ".env")
-
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN", ""
+).strip()
 from src.backend.db import SessionLocal
-from src.backend.models import (
-    Camera,
-    FallEvent,
-    HouseholdTelegramBot,
-    HouseholdTelegramChat,
-)
-from src.backend.telegram_security import decrypt_telegram_token
+from src.backend.models import Camera, FallEvent, HouseholdTelegramChat
 
 
 # --------------------------------------------------
 # Configuration
 # --------------------------------------------------
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
 MQTT_BROKER = os.getenv("MQTT_BROKER", "test.mosquitto.org")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_TOPIC = os.getenv(
-    "MQTT_TOPIC", "esp32/camera/detection"
-)
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "esp32/camera/detection")
 
 CLIENT_ID = "Telegram_Alert_Listener"
 MAX_PROCESSED_EVENTS = 100
 REMINDER_DELAY_SECONDS = 60
 
-telegram_polling = True
+telegram_polling = False
 fall_events_lock = threading.Lock()
 
-# Keyed by event_id. Each event stores its household_id and MQTT payload.
+# Key: (household_id, event_identifier)
+# Value: event data needed by the reminder worker.
 pending_fall_events = {}
-acknowledged_event_ids = set()
 
+# Keep a bounded in-memory set to avoid processing duplicate MQTT messages.
 processed_event_keys = set()
 processed_event_order = deque()
 
-# Filled at startup from household_telegram_bots.
-BOT_CONFIGS_BY_HOUSEHOLD = {}
+
+# --------------------------------------------------
+# Shared Telegram Bot
+# --------------------------------------------------
+
+def get_shared_telegram_bot():
+    """Validate the shared Bot Token and return Telegram Bot information."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError(
+            "Chưa cấu hình TELEGRAM_BOT_TOKEN trong file .env"
+        )
+
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe",
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("ok"):
+            raise RuntimeError("Telegram Bot Token không hợp lệ.")
+
+        bot_info = data["result"]
+        print(
+            f"[TELEGRAM] Shared Bot connected: "
+            f"@{bot_info.get('username', 'unknown')}"
+        )
+        return bot_info
+
+    except requests.RequestException as error:
+        raise RuntimeError(
+            f"Không thể kết nối Telegram API: {error}"
+        ) from error
 
 
 # --------------------------------------------------
 # Database helpers
 # --------------------------------------------------
 
-def load_household_telegram_bots():
-    """Load active household bots and decrypt their tokens in memory."""
-    db = SessionLocal()
-
-    try:
-        bots = db.query(HouseholdTelegramBot).filter(
-            HouseholdTelegramBot.is_active.is_(True)
-        ).all()
-
-        bot_configs = []
-
-        for bot in bots:
-            try:
-                token = decrypt_telegram_token(bot.bot_token_encrypted)
-            except Exception as error:
-                print(
-                    f"[TELEGRAM CONFIG ERROR] Cannot decrypt token "
-                    f"for household {bot.household_id}: {error}"
-                )
-                continue
-
-            if not token or not bot.bot_username:
-                print(
-                    f"[TELEGRAM CONFIG WARNING] Incomplete bot config "
-                    f"for household {bot.household_id}"
-                )
-                continue
-
-            bot_configs.append({
-                "household_id": bot.household_id,
-                "bot_username": bot.bot_username,
-                "bot_token": token,
-            })
-
-        return bot_configs
-
-    finally:
-        db.close()
-
-
 def get_household_chat_ids(household_id):
-    """Return only Telegram chats linked to this household."""
+    """Return only Telegram chats linked to the requested household."""
     db = SessionLocal()
 
     try:
-        rows = db.query(HouseholdTelegramChat.telegram_chat_id).filter(
+        rows = db.query(
+            HouseholdTelegramChat.telegram_chat_id
+        ).filter(
             HouseholdTelegramChat.household_id == household_id,
             HouseholdTelegramChat.telegram_chat_id.isnot(None),
             HouseholdTelegramChat.linked_at.isnot(None),
         ).all()
 
+        # Remove duplicates while preserving order.
         return list(dict.fromkeys(str(row[0]) for row in rows))
 
     finally:
@@ -125,7 +119,7 @@ def get_household_chat_ids(household_id):
 
 
 def get_household_id_for_device(device_id):
-    """Resolve the household from the registered camera, not MQTT input."""
+    """Resolve household_id from the registered camera, never from MQTT payload."""
     if not device_id:
         return None
 
@@ -145,7 +139,7 @@ def get_household_id_for_device(device_id):
 def get_event_acknowledged(household_id, event_identifier):
     """
     Return True/False from PostgreSQL.
-    Return None when the event row is not found yet.
+    Return None when the event row has not been found yet.
     """
     db = SessionLocal()
 
@@ -191,11 +185,57 @@ def acknowledge_event_in_database(household_id, event_identifier):
         db.close()
 
 
+def acknowledge_event_for_chat(household_id, event_identifier, chat_id):
+    """
+    Acknowledge only if:
+    1. The event belongs to household_id.
+    2. The Telegram chat is linked to that same household.
+    """
+    db = SessionLocal()
+
+    try:
+        linked_chat = db.query(HouseholdTelegramChat).filter(
+            HouseholdTelegramChat.household_id == household_id,
+            HouseholdTelegramChat.telegram_chat_id == int(chat_id),
+            HouseholdTelegramChat.linked_at.isnot(None),
+        ).first()
+
+        if linked_chat is None:
+            return False, "Bạn chưa liên kết Telegram với hộ gia đình này."
+
+        event = db.query(FallEvent).filter(
+            FallEvent.household_id == household_id,
+            FallEvent.event_id == event_identifier,
+        ).first()
+
+        if event is None:
+            return False, "Không tìm thấy cảnh báo trong hộ gia đình này."
+
+        event.acknowledged = True
+        db.commit()
+
+        return True, "Đã ghi nhận! Cảm ơn bạn đã tiếp nhận cảnh báo."
+
+    except Exception as error:
+        db.rollback()
+        print(f"[ACK DATABASE ERROR] {error}")
+        return False, "Không thể cập nhật trạng thái xác nhận."
+
+    finally:
+        db.close()
+
+
 # --------------------------------------------------
 # Telegram linking
 # --------------------------------------------------
 
-def link_telegram_chat(household_id, chat_id, link_code):
+def link_telegram_chat(chat_id, link_code):
+    """
+    Link a Telegram private chat using a one-time Website code.
+
+    The same Telegram chat may be linked to multiple households belonging
+    to the same Website user. It cannot be linked to a different Website user.
+    """
     db = SessionLocal()
 
     try:
@@ -204,13 +244,24 @@ def link_telegram_chat(household_id, chat_id, link_code):
         ).hexdigest()
 
         telegram_chat = db.query(HouseholdTelegramChat).filter(
-            HouseholdTelegramChat.household_id == household_id,
             HouseholdTelegramChat.link_code_hash == link_code_hash,
             HouseholdTelegramChat.link_code_expires_at > datetime.now(timezone.utc),
         ).first()
 
         if telegram_chat is None:
             return False, "Mã liên kết không hợp lệ hoặc đã hết hạn."
+
+        existing_chat = db.query(HouseholdTelegramChat).filter(
+            HouseholdTelegramChat.telegram_chat_id == int(chat_id),
+            HouseholdTelegramChat.linked_at.isnot(None),
+            HouseholdTelegramChat.user_id != telegram_chat.user_id,
+        ).first()
+
+        if existing_chat:
+            return (
+                False,
+                "Tài khoản Telegram này đã được liên kết với tài khoản Website khác.",
+            )
 
         telegram_chat.telegram_chat_id = int(chat_id)
         telegram_chat.linked_at = datetime.now(timezone.utc)
@@ -223,11 +274,15 @@ def link_telegram_chat(household_id, chat_id, link_code):
     except Exception as error:
         db.rollback()
         print(f"[TELEGRAM LINK ERROR] {error}")
-        return False, "Không thể liên kết Telegram. Có thể tài khoản này đã được liên kết."
+        return False, "Không thể liên kết Telegram."
 
     finally:
         db.close()
 
+
+# --------------------------------------------------
+# Telegram low-level send helpers
+# --------------------------------------------------
 
 def send_telegram_text_to_chat(bot_token, chat_id, message):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -247,11 +302,42 @@ def send_telegram_text_to_chat(bot_token, chat_id, message):
         return json.loads(response.read().decode("utf-8"))
 
 
-def handle_telegram_start(message, household_id, bot_token):
+def answer_telegram_callback(callback_query_id, message, bot_token):
+    url = (
+        f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+    )
+    payload = {
+        "callback_query_id": callback_query_id,
+        "text": message,
+    }
+
+    try:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(request, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        return result.get("ok", False)
+
+    except Exception as error:
+        print(f"[TELEGRAM CALLBACK ERROR] {error}")
+        return False
+
+
+# --------------------------------------------------
+# Telegram message handling
+# --------------------------------------------------
+
+def handle_telegram_start(message, bot_token):
+    """Handle /start link_code from a private chat."""
     chat = message.get("chat", {})
     sender = message.get("from", {})
 
-    # Only private chats can be linked.
     if chat.get("type") != "private":
         return
 
@@ -267,19 +353,27 @@ def handle_telegram_start(message, household_id, bot_token):
         return
 
     if len(parts) != 2:
-        reply = "Vui lòng tạo mã liên kết trên Website, sau đó mở liên kết Telegram từ Website."
+        reply = (
+            "Vui lòng tạo mã liên kết trên Website, "
+            "sau đó mở liên kết Telegram từ Website."
+        )
     else:
         link_code = parts[1].strip()
         _, reply = link_telegram_chat(
-            household_id=household_id,
             chat_id=chat_id,
             link_code=link_code,
         )
 
     try:
-        result = send_telegram_text_to_chat(bot_token, chat_id, reply)
+        result = send_telegram_text_to_chat(
+            bot_token,
+            chat_id,
+            reply,
+        )
+
         if not result.get("ok"):
             print("[TELEGRAM LINK] Telegram did not accept the reply.")
+
     except Exception as error:
         print(f"[TELEGRAM LINK SEND ERROR] {error}")
 
@@ -289,30 +383,23 @@ def handle_telegram_start(message, household_id, bot_token):
 # --------------------------------------------------
 
 def send_telegram_message(message, household_id):
-    bot_config = BOT_CONFIGS_BY_HOUSEHOLD.get(household_id)
-
-    if not bot_config:
-        print(
-            f"[TELEGRAM] No active bot for household {household_id}; "
-            "message was not sent."
-        )
+    """Send a text message only to linked recipients of one household."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("[TELEGRAM] Shared Bot Token is missing; message not sent.")
         return
 
     chat_ids = get_household_chat_ids(household_id)
 
     if not chat_ids:
         print(
-            f"[TELEGRAM] No linked Telegram recipients "
-            f"for household {household_id}."
+            f"[TELEGRAM] No linked recipients for household {household_id}."
         )
         return
-
-    bot_token = bot_config["bot_token"]
 
     for chat_id in chat_ids:
         try:
             result = send_telegram_text_to_chat(
-                bot_token,
+                TELEGRAM_BOT_TOKEN,
                 chat_id,
                 message,
             )
@@ -325,7 +412,7 @@ def send_telegram_message(message, household_id):
             else:
                 print(
                     f"[TELEGRAM ERROR] Telegram rejected message "
-                    f"for household {household_id}."
+                    f"for household {household_id}, chat {chat_id}."
                 )
 
         except Exception as error:
@@ -338,25 +425,19 @@ def send_telegram_photo(
     event_identifier,
     household_id,
 ):
-    bot_config = BOT_CONFIGS_BY_HOUSEHOLD.get(household_id)
-
-    if not bot_config:
-        print(
-            f"[TELEGRAM] No active bot for household {household_id}; "
-            "photo was not sent."
-        )
+    """Send a fall snapshot only to linked recipients of the event household."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("[TELEGRAM] Shared Bot Token is missing; photo not sent.")
         return
 
     chat_ids = get_household_chat_ids(household_id)
 
     if not chat_ids:
         print(
-            f"[TELEGRAM] No linked Telegram recipients "
-            f"for household {household_id}."
+            f"[TELEGRAM] No linked recipients for household {household_id}."
         )
         return
 
-    bot_token = bot_config["bot_token"]
     image_path = Path(image_path) if image_path else None
 
     if image_path and not image_path.is_absolute():
@@ -367,14 +448,25 @@ def send_telegram_photo(
         send_telegram_message(caption, household_id)
         return
 
-    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
 
-    reply_markup = {
-        "inline_keyboard": [[{
-            "text": "✅ Đã tiếp nhận cảnh báo",
-            "callback_data": f"ACK|{event_identifier}",
-        }]]
-    }
+    # Include household_id in callback data so the callback can be
+    # checked against both the event and the Telegram recipient's membership.
+    callback_data = f"ACK|{household_id}|{event_identifier}"
+
+    if len(callback_data.encode("utf-8")) > 64:
+        print(
+            "[TELEGRAM] Callback data exceeds Telegram's 64-byte limit; "
+            "photo will be sent without the acknowledgment button."
+        )
+        reply_markup = None
+    else:
+        reply_markup = {
+            "inline_keyboard": [[{
+                "text": "✅ Đã tiếp nhận cảnh báo",
+                "callback_data": callback_data,
+            }]]
+        }
 
     for chat_id in chat_ids:
         boundary = "----TelegramBoundary" + uuid.uuid4().hex
@@ -396,7 +488,12 @@ def send_telegram_photo(
 
             add_field("chat_id", chat_id)
             add_field("caption", caption)
-            add_field("reply_markup", json.dumps(reply_markup, ensure_ascii=False))
+
+            if reply_markup is not None:
+                add_field(
+                    "reply_markup",
+                    json.dumps(reply_markup, ensure_ascii=False),
+                )
 
             photo_header = (
                 f"--{boundary}\r\n"
@@ -430,55 +527,97 @@ def send_telegram_photo(
             else:
                 print(
                     f"[TELEGRAM PHOTO ERROR] Telegram rejected photo "
-                    f"for household {household_id}."
+                    f"for household {household_id}, chat {chat_id}."
                 )
 
         except Exception as error:
             print(f"[TELEGRAM PHOTO ERROR] {error}")
 
 
-def answer_telegram_callback(callback_query_id, message, bot_token):
-    url = (
-        f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
-    )
+# --------------------------------------------------
+# Telegram callback handling
+# --------------------------------------------------
 
-    payload = {
-        "callback_query_id": callback_query_id,
-        "text": message,
-    }
+def handle_telegram_callback(callback, bot_token):
+    """Handle ACK callback and enforce household-level access isolation."""
+    callback_data = callback.get("data", "")
+    callback_id = callback.get("id")
+
+    if not callback_data.startswith("ACK|"):
+        return
+
+    parts = callback_data.split("|", 2)
+
+    if len(parts) != 3:
+        answer_telegram_callback(
+            callback_id,
+            "Nút xác nhận không hợp lệ. Vui lòng dùng cảnh báo mới nhất.",
+            bot_token,
+        )
+        return
 
     try:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        household_id = int(parts[1])
+    except (TypeError, ValueError):
+        answer_telegram_callback(
+            callback_id,
+            "Không xác định được hộ gia đình của cảnh báo.",
+            bot_token,
         )
+        return
 
-        with urllib.request.urlopen(request, timeout=10) as response:
-            result = json.loads(response.read().decode("utf-8"))
+    event_identifier = parts[2]
+    callback_message = callback.get("message") or {}
+    chat = callback_message.get("chat") or {}
+    chat_id = chat.get("id")
 
-        return result.get("ok", False)
+    if not chat_id:
+        answer_telegram_callback(
+            callback_id,
+            "Không xác định được tài khoản Telegram.",
+            bot_token,
+        )
+        return
 
-    except Exception as error:
-        print(f"[TELEGRAM CALLBACK ERROR] {error}")
-        return False
+    ack_success, ack_reply = acknowledge_event_for_chat(
+        household_id=household_id,
+        event_identifier=event_identifier,
+        chat_id=chat_id,
+    )
+
+    if ack_success:
+        event_key = (household_id, str(event_identifier))
+
+        with fall_events_lock:
+            event_data = pending_fall_events.get(event_key)
+
+            if event_data:
+                event_data["acknowledged"] = True
+                event_data["acknowledged_by"] = str(chat_id)
+
+        print(
+            f"[ACKNOWLEDGED] Event {event_identifier} "
+            f"| Household {household_id} | Chat {chat_id}"
+        )
+        print("[REMINDER] Reminder cancelled for this event.")
+
+    answer_telegram_callback(
+        callback_id,
+        ack_reply,
+        bot_token,
+    )
 
 
 # --------------------------------------------------
-# Long polling: one independent polling loop per household bot
+# Long polling: exactly one shared Bot polling loop
 # --------------------------------------------------
 
-def poll_household_bot(bot_config):
-    household_id = bot_config["household_id"]
-    bot_token = bot_config["bot_token"]
-    bot_username = bot_config["bot_username"]
-
+def poll_shared_bot(bot_token, bot_username):
     offset = None
 
     print(
-        f"[TELEGRAM] Starting Bot @{bot_username} "
-        f"for household {household_id}."
+        f"[TELEGRAM] Starting shared Bot @{bot_username}. "
+        "One polling thread for all households."
     )
 
     while telegram_polling:
@@ -503,10 +642,7 @@ def poll_household_bot(bot_config):
                 result = json.loads(response.read().decode("utf-8"))
 
             if not result.get("ok"):
-                print(
-                    f"[TELEGRAM ERROR] getUpdates failed "
-                    f"for household {household_id}."
-                )
+                print("[TELEGRAM ERROR] Shared Bot getUpdates failed.")
                 time.sleep(3)
                 continue
 
@@ -515,101 +651,19 @@ def poll_household_bot(bot_config):
 
                 message = update.get("message")
                 if message:
-                    handle_telegram_start(
-                        message,
-                        household_id,
-                        bot_token,
-                    )
+                    handle_telegram_start(message, bot_token)
                     continue
 
                 callback = update.get("callback_query")
-                if not callback:
-                    continue
-
-                callback_data = callback.get("data", "")
-                if not callback_data.startswith("ACK|"):
-                    continue
-
-                event_identifier = callback_data.split("|", 1)[1]
-                callback_message = callback.get("message") or {}
-                chat = callback_message.get("chat") or {}
-                chat_id = chat.get("id")
-
-                if not chat_id:
-                    answer_telegram_callback(
-                        callback["id"],
-                        "Không xác định được tài khoản Telegram.",
-                        bot_token,
-                    )
-                    continue
-
-                # Check both: this Telegram chat is linked to this household,
-                # and the event belongs to this same household.
-                db = SessionLocal()
-                try:
-                    linked_chat = db.query(HouseholdTelegramChat).filter(
-                        HouseholdTelegramChat.household_id == household_id,
-                        HouseholdTelegramChat.telegram_chat_id == int(chat_id),
-                        HouseholdTelegramChat.linked_at.isnot(None),
-                    ).first()
-
-                    event = db.query(FallEvent).filter(
-                        FallEvent.household_id == household_id,
-                        FallEvent.event_id == event_identifier,
-                    ).first()
-
-                    if linked_chat is None:
-                        ack_success = False
-                        ack_reply = "Bạn chưa liên kết Telegram với hộ gia đình này."
-                    elif event is None:
-                        ack_success = False
-                        ack_reply = "Không tìm thấy cảnh báo trong hộ gia đình này."
-                    else:
-                        event.acknowledged = True
-                        db.commit()
-                        ack_success = True
-                        ack_reply = "Đã ghi nhận! Cảm ơn bạn đã tiếp nhận cảnh báo."
-
-                except Exception as error:
-                    db.rollback()
-                    print(f"[ACK DATABASE ERROR] {error}")
-                    ack_success = False
-                    ack_reply = "Không thể cập nhật trạng thái xác nhận."
-                finally:
-                    db.close()
-
-                if ack_success:
-                    with fall_events_lock:
-                        event_data = pending_fall_events.get(event_identifier)
-                        if event_data:
-                            event_data["acknowledged"] = True
-                            event_data["acknowledged_by"] = str(chat_id)
-
-                        acknowledged_event_ids.add(event_identifier)
-
-                    print(
-                        f"[ACKNOWLEDGED] Event {event_identifier} "
-                        f"| Household {household_id} | Chat {chat_id}"
-                    )
-                    print("[REMINDER] Reminder cancelled for this event.")
-
-                answer_telegram_callback(
-                    callback["id"],
-                    ack_reply,
-                    bot_token,
-                )
+                if callback:
+                    handle_telegram_callback(callback, bot_token)
 
         except Exception as error:
             if telegram_polling:
-                print(
-                    f"[TELEGRAM POLLING ERROR] "
-                    f"Household {household_id}: {error}"
-                )
+                print(f"[TELEGRAM POLLING ERROR] Shared Bot: {error}")
                 time.sleep(3)
 
-    print(
-        f"[TELEGRAM] Polling stopped for household {household_id}."
-    )
+    print("[TELEGRAM] Shared Bot polling stopped.")
 
 
 # --------------------------------------------------
@@ -624,19 +678,21 @@ def reminder_worker():
         candidates = []
 
         with fall_events_lock:
-            for event_identifier, event_data in pending_fall_events.items():
+            for event_key, event_data in pending_fall_events.items():
                 if event_data["acknowledged"] or event_data["reminder_sent"]:
                     continue
 
                 elapsed = current_time - event_data["created_at"]
+
                 if elapsed >= REMINDER_DELAY_SECONDS:
                     candidates.append((
-                        event_identifier,
+                        event_key,
                         event_data["household_id"],
+                        event_data["event_identifier"],
                         event_data["payload"],
                     ))
 
-        for event_identifier, household_id, payload in candidates:
+        for event_key, household_id, event_identifier, payload in candidates:
             # Website and Telegram both update this same database field.
             acknowledged = get_event_acknowledged(
                 household_id,
@@ -645,9 +701,10 @@ def reminder_worker():
 
             if acknowledged is True:
                 with fall_events_lock:
-                    event_data = pending_fall_events.get(event_identifier)
+                    event_data = pending_fall_events.get(event_key)
                     if event_data:
                         event_data["acknowledged"] = True
+
                 print(
                     f"[REMINDER] Event {event_identifier} already "
                     "acknowledged in database; reminder cancelled."
@@ -659,7 +716,8 @@ def reminder_worker():
                 continue
 
             with fall_events_lock:
-                event_data = pending_fall_events.get(event_identifier)
+                event_data = pending_fall_events.get(event_key)
+
                 if (
                     event_data is None
                     or event_data["acknowledged"]
@@ -703,15 +761,13 @@ def reminder_worker():
 # MQTT callbacks
 # --------------------------------------------------
 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
         print("[MQTT] Connected successfully.")
         client.subscribe(MQTT_TOPIC, qos=1)
         print(f"[MQTT] Subscribed to: {MQTT_TOPIC}")
     else:
-        print(f"[MQTT] Connection failed. Code: {rc}")
-
-
+        print(f"[MQTT] Connection failed. Code: {reason_code}")
 def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode("utf-8"))
@@ -720,12 +776,15 @@ def on_message(client, userdata, msg):
             return
 
         event_identifier = payload.get("event_id") or payload.get("timestamp")
+
         if not event_identifier:
             print("[WARNING] Event has no unique identifier. Ignoring.")
             return
 
         event_identifier = str(event_identifier)
         device_id = payload.get("device_id")
+
+        # Resolve household from the registered camera in PostgreSQL.
         household_id = get_household_id_for_device(device_id)
 
         if household_id is None:
@@ -735,14 +794,18 @@ def on_message(client, userdata, msg):
             )
             return
 
-        if household_id not in BOT_CONFIGS_BY_HOUSEHOLD:
+        if not TELEGRAM_BOT_TOKEN:
             print(
-                f"[TELEGRAM] No active Bot for household {household_id}; "
-                "event will not be sent to Telegram."
+                "[TELEGRAM] Shared Bot Token is missing; "
+                "event will not be sent."
             )
             return
 
-        event_key = (str(device_id), "FALL_DETECTED", str(event_identifier))
+        event_key = (
+            str(device_id),
+            "FALL_DETECTED",
+            str(event_identifier),
+        )
 
         if event_key in processed_event_keys:
             print("[DUPLICATE] Event already processed. Ignoring.")
@@ -751,9 +814,12 @@ def on_message(client, userdata, msg):
         processed_event_keys.add(event_key)
         processed_event_order.append(event_key)
 
+        household_event_key = (household_id, event_identifier)
+
         with fall_events_lock:
-            pending_fall_events[event_identifier] = {
+            pending_fall_events[household_event_key] = {
                 "household_id": household_id,
+                "event_identifier": event_identifier,
                 "created_at": time.monotonic(),
                 "acknowledged": False,
                 "acknowledged_by": None,
@@ -798,65 +864,55 @@ def on_message(client, userdata, msg):
         print(f"[MQTT MESSAGE ERROR] {error}")
 
 
-def on_disconnect(client, userdata, rc):
-    print(f"[MQTT] Disconnected. Code: {rc}")
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+    print(f"[MQTT] Disconnected. Reason code: {reason_code}")
 
+    if reason_code != 0:
+        print("[MQTT] Unexpected disconnection. Waiting for automatic reconnect...")
 
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
 
 def main():
-    global telegram_polling, BOT_CONFIGS_BY_HOUSEHOLD
+    global telegram_polling
+
+    # Validate the shared Bot Token before starting MQTT or worker threads.
+    bot_info = get_shared_telegram_bot()
+    bot_username = bot_info.get("username", "unknown")
 
     telegram_polling = True
-
-    bot_configs = load_household_telegram_bots()
-    BOT_CONFIGS_BY_HOUSEHOLD = {
-        bot["household_id"]: bot for bot in bot_configs
-    }
-
-    print(
-        f"[TELEGRAM] Found {len(BOT_CONFIGS_BY_HOUSEHOLD)} "
-        "active household Bot(s)."
-    )
-
-    for household_id, bot in BOT_CONFIGS_BY_HOUSEHOLD.items():
-        chat_ids = get_household_chat_ids(household_id)
-        print(
-            f"[TELEGRAM] Household {household_id}: "
-            f"@{bot['bot_username']} | linked recipients: {len(chat_ids)}"
-        )
 
     print("[DEBUG] RUNNING FILE:", Path(__file__).resolve())
     print("[DEBUG] REMINDER DELAY:", REMINDER_DELAY_SECONDS)
     print("=" * 55)
-    print("TELEGRAM FALL ALERT LISTENER")
+    print("TELEGRAM FALL ALERT LISTENER - SHARED BOT")
     print("=" * 55)
+    print(f"Telegram Bot: @{bot_username}")
     print(f"MQTT Broker: {MQTT_BROKER}")
     print(f"MQTT Topic: {MQTT_TOPIC}")
     print("=" * 55)
 
-    client = mqtt.Client(client_id=CLIENT_ID)
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id=CLIENT_ID
+    )
     client.on_connect = on_connect
     client.on_message = on_message
     client.on_disconnect = on_disconnect
 
-    polling_threads = []
-
-    for bot_config in bot_configs:
-        thread = threading.Thread(
-            target=poll_household_bot,
-            args=(bot_config,),
-            daemon=True,
-        )
-        thread.start()
-        polling_threads.append(thread)
+    polling_thread = threading.Thread(
+        target=poll_shared_bot,
+        args=(TELEGRAM_BOT_TOKEN, bot_username),
+        daemon=True,
+    )
 
     reminder_thread = threading.Thread(
         target=reminder_worker,
         daemon=True,
     )
+
+    polling_thread.start()
     reminder_thread.start()
 
     try:
@@ -871,12 +927,15 @@ def main():
 
     finally:
         telegram_polling = False
-        client.disconnect()
 
-        for thread in polling_threads:
-            thread.join(timeout=2)
+        try:
+            client.disconnect()
+        except Exception:
+            pass
 
-        reminder_thread.join(timeout=2)
+        polling_thread.join(timeout=3)
+        reminder_thread.join(timeout=3)
+
         print("[INFO] Listener stopped.")
 
 

@@ -34,6 +34,9 @@ class FallEventResponse(BaseModel):
     average_confidence: float | None
     snapshot_key: str | None
     acknowledged: bool
+    processing_status: str
+    resolved_at: datetime | None = None
+    created_at: datetime
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

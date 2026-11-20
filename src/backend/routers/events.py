@@ -144,6 +144,63 @@ def acknowledge_fall_event(
         "event_id": event.id,
         "acknowledged": event.acknowledged
     }
+@router.patch("/{household_id}/events/{event_id}/resolve")
+def resolve_fall_event(
+    household_id: int,
+    event_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Kiểm tra thành viên hộ gia đình
+    membership = db.query(HouseholdMember).filter(
+        HouseholdMember.household_id == household_id,
+        HouseholdMember.user_id == current_user.id
+    ).first()
+
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Household not found"
+        )
+
+    # Tìm sự kiện té ngã
+    event = db.query(FallEvent).filter(
+        FallEvent.id == event_id,
+        FallEvent.household_id == household_id
+    ).first()
+
+    if event is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Fall event not found"
+        )
+
+    # Nếu sự kiện đã được xử lý
+    if event.processing_status == "resolved":
+        return {
+            "status": "success",
+            "message": "Event already resolved",
+            "event_id": event.id,
+            "processing_status": event.processing_status,
+            "resolved_at": event.resolved_at
+        }
+
+    # Cập nhật trạng thái xử lý
+    from datetime import datetime, timezone
+
+    event.processing_status = "resolved"
+    event.resolved_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(event)
+
+    return {
+        "status": "success",
+        "message": "Fall event resolved successfully",
+        "event_id": event.id,
+        "processing_status": event.processing_status,
+        "resolved_at": event.resolved_at
+    }
 
 @router.get(
     "/{household_id}/events/{event_id}",

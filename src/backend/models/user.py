@@ -48,6 +48,11 @@ class User(Base):
         nullable=False,
         server_default="true"
     )
+    role = Column(
+        String(20),
+        nullable=False,
+        server_default="user"
+    )
     __table_args__ = (
         Index(
             "uq_users_email_lower",

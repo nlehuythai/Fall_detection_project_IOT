@@ -1,6 +1,7 @@
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     String,
     DateTime,
@@ -38,7 +39,10 @@ class Camera(Base):
         String(150),
         nullable=False
     )
-
+    stream_url = Column(
+    String(500),
+    nullable=True
+    )
     device_key_hash = Column(
         String,
         nullable=True
@@ -49,6 +53,12 @@ class Camera(Base):
         nullable=False,
         default="offline",
         server_default="offline"
+    )
+    monitoring_enabled = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false"
     )
 
     created_at = Column(

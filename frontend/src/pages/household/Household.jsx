@@ -23,8 +23,10 @@ import { householdService } from "../../services/householdService";
 
 export default function Household() {
     const {
+        households,
         household,
         householdId,
+        selectHousehold,
         loading: householdLoading,
     } = useHousehold();
 
@@ -46,12 +48,13 @@ export default function Household() {
     const [householdName, setHouseholdName] = useState("");
     const [createHouseholdLoading, setCreateHouseholdLoading] = useState(false);
     // Telegram
-    const [telegramBot, setTelegramBot] = useState(null);
+    // Telegram - Shared Bot
     const [telegramLinkData, setTelegramLinkData] = useState(null);
-    const [telegramLoading, setTelegramLoading] = useState(false);
     const [telegramLinkLoading, setTelegramLinkLoading] = useState(false);
     const [telegramError, setTelegramError] = useState("");
     const [telegramSuccess, setTelegramSuccess] = useState("");
+    const [telegramStatus, setTelegramStatus] = useState(null);
+    const [telegramStatusLoading, setTelegramStatusLoading] = useState(false);
     const fetchMembers = useCallback(async () => {
         if (!householdId) return;
 
@@ -68,25 +71,6 @@ export default function Household() {
             );
         } finally {
             setLoading(false);
-        }
-    }, [householdId]);
-    const fetchTelegramBot = useCallback(async () => {
-        if (!householdId) return;
-
-        try {
-            setTelegramLoading(true);
-            setTelegramError("");
-
-            const data = await householdService.getTelegramBot(householdId);
-            setTelegramBot(data);
-        } catch (err) {
-            setTelegramBot(null);
-            setTelegramError(
-                err.response?.data?.detail ||
-                "Không thể tải thông tin Telegram Bot."
-            );
-        } finally {
-            setTelegramLoading(false);
         }
     }, [householdId]);
     const handleCreateTelegramLink = async () => {
@@ -108,6 +92,36 @@ export default function Household() {
             );
         } finally {
             setTelegramLinkLoading(false);
+        }
+    };
+    const handleDisconnectTelegram = async () => {
+        const confirmed = window.confirm(
+            "Bạn có chắc chắn muốn ngắt liên kết tài khoản Telegram không?"
+        );
+
+        if (!confirmed) return;
+
+        try {
+            setTelegramStatusLoading(true);
+            setTelegramError("");
+            setTelegramSuccess("");
+
+            await householdService.disconnectTelegram(householdId);
+
+            setTelegramStatus({
+                is_linked: false,
+                linked_at: null,
+            });
+
+            setTelegramLinkData(null);
+            setTelegramSuccess("Đã ngắt liên kết Telegram thành công.");
+        } catch (err) {
+            setTelegramError(
+                err.response?.data?.detail ||
+                "Không thể ngắt liên kết Telegram."
+            );
+        } finally {
+            setTelegramStatusLoading(false);
         }
     };
     const handleOpenTelegram = () => {
@@ -211,8 +225,25 @@ export default function Household() {
         fetchMembers();
     }, [fetchMembers]);
     useEffect(() => {
-        fetchTelegramBot();
-    }, [fetchTelegramBot]);
+        if (!householdId) return;
+
+        const fetchTelegramStatus = async () => {
+            try {
+                setTelegramStatusLoading(true);
+
+                const data = await householdService.getTelegramStatus(householdId);
+                console.log("Telegram status từ API:", data);
+                setTelegramStatus(data);
+            } catch (error) {
+                console.error("Lỗi lấy trạng thái Telegram:", error);
+                setTelegramStatus(null);
+            } finally {
+                setTelegramStatusLoading(false);
+            }
+        };
+
+        fetchTelegramStatus();
+    }, [householdId]);
     const currentMember = members.find(
         (member) => Number(member.user_id) === Number(user?.id)
     );
@@ -316,7 +347,128 @@ export default function Household() {
                 </button>
             </div>
 
+            {/* Telegram Integration - Shared Bot */}
+            {householdId && (
+                <div className="rounded-xl border border-gray-200 bg-white p-5">
+                    <div className="mb-4 flex items-center gap-3">
+                        <div className="rounded-lg bg-blue-50 p-2 text-blue-600">
+                            <Send size={21} />
+                        </div>
+
+                        <div>
+                            <h2 className="font-semibold text-gray-900">
+                                Liên kết Telegram
+                            </h2>
+                            <p className="text-sm text-gray-500">
+                                Kết nối tài khoản Telegram để nhận cảnh báo té ngã.
+                            </p>
+                        </div>
+                    </div>
+
+                    <p className="mb-4 text-sm text-gray-600">
+                        Hộ gia đình sử dụng Bot Telegram chung của hệ thống.
+                        Mỗi thành viên có thể liên kết tài khoản Telegram riêng
+                        để nhận cảnh báo của hộ gia đình này.
+                    </p>
+
+                    <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        {telegramStatusLoading ? (
+                            <p className="text-sm text-gray-500">
+                                Đang kiểm tra trạng thái Telegram...
+                            </p>
+                        ) : telegramStatus?.is_linked ? (
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="h-2 w-2 rounded-full bg-green-500"></span>
+                                        <span className="text-sm font-medium text-green-700">
+                                            Đã liên kết Telegram
+                                        </span>
+                                    </div>
+
+                                    <p className="mt-1 text-xs text-gray-500">
+                                        Thời gian liên kết:{" "}
+                                        {telegramStatus.linked_at
+                                            ? new Date(telegramStatus.linked_at).toLocaleString("vi-VN")
+                                            : "Không xác định"}
+                                    </p>
+                                </div>
+
+                                <button
+                                    onClick={handleDisconnectTelegram}
+                                    disabled={telegramStatusLoading}
+                                    className="rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                >
+                                    Ngắt liên kết
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="flex items-center gap-2">
+                                <span className="h-2 w-2 rounded-full bg-gray-400"></span>
+                                <span className="text-sm font-medium text-gray-600">
+                                    Chưa liên kết Telegram
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                    {!telegramStatusLoading && !telegramStatus?.is_linked && (
+                        <button
+                            onClick={handleCreateTelegramLink}
+                            disabled={telegramLinkLoading}
+                            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                            {telegramLinkLoading ? "Đang tạo mã..." : "Tạo mã liên kết"}
+                        </button>
+                    )}
+
+                    {telegramLinkData && (
+                        <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                            <p className="text-sm text-gray-600">
+                                Bot Telegram chung
+                            </p>
+
+                            <p className="mb-3 font-semibold text-blue-600">
+                                @{telegramLinkData.bot_username.replace(/^@/, "")}
+                            </p>
+
+                            <p className="text-sm text-gray-600">
+                                Mã liên kết
+                            </p>
+
+                            <p className="mb-3 break-all font-mono font-semibold text-gray-900">
+                                {telegramLinkData.link_code}
+                            </p>
+
+                            <p className="mb-3 text-xs text-gray-500">
+                                Mã có hiệu lực đến:{" "}
+                                {new Date(telegramLinkData.expires_at).toLocaleString("vi-VN")}
+                            </p>
+
+                            <button
+                                onClick={handleOpenTelegram}
+                                className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600"
+                            >
+                                Mở Telegram
+                            </button>
+                        </div>
+                    )}
+
+                    {telegramError && (
+                        <p className="mt-3 text-sm text-red-600">
+                            {telegramError}
+                        </p>
+                    )}
+
+                    {telegramSuccess && (
+                        <p className="mt-3 text-sm text-green-600">
+                            {telegramSuccess}
+                        </p>
+                    )}
+                </div>
+            )}
+
             {/* Household information */}
+
             {/* Create household - only when user has no household */}
             {!householdId && (
                 <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -358,111 +510,6 @@ export default function Household() {
                 </div>
             )}
 
-            {/* Telegram Integration */}
-            {householdId && (
-                <div className="rounded-xl border border-gray-200 bg-white p-5">
-                    <div className="mb-4 flex items-center gap-3">
-                        <div className="rounded-lg bg-sky-50 p-2 text-sky-600">
-                            <Bot size={22} />
-                        </div>
-
-                        <div>
-                            <h2 className="font-semibold text-gray-900">
-                                Liên kết Telegram
-                            </h2>
-                            <p className="text-sm text-gray-500">
-                                Kết nối tài khoản Telegram để nhận cảnh báo té ngã.
-                            </p>
-                        </div>
-                    </div>
-
-                    {telegramLoading ? (
-                        <p className="text-sm text-gray-500">
-                            Đang tải thông tin Telegram...
-                        </p>
-                    ) : telegramBot?.bot_username ? (
-                        <>
-                            <div className="mb-4 rounded-lg bg-gray-50 p-3">
-                                <p className="text-xs text-gray-500">
-                                    Telegram Bot của hộ gia đình
-                                </p>
-                                <p className="mt-1 font-medium text-gray-900">
-                                    @{telegramBot.bot_username.replace(/^@/, "")}
-                                </p>
-                                <p className="mt-1 text-xs text-gray-500">
-                                    Trạng thái: {telegramBot.is_active ? "Đang hoạt động" : "Đã tắt"}
-                                </p>
-                            </div>
-
-                            {telegramBot.is_active ? (
-                                <>
-                                    <button
-                                        type="button"
-                                        onClick={handleCreateTelegramLink}
-                                        disabled={telegramLinkLoading}
-                                        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                                    >
-                                        <Link size={16} />
-                                        {telegramLinkLoading
-                                            ? "Đang tạo mã..."
-                                            : "Tạo mã liên kết"}
-                                    </button>
-
-                                    {telegramLinkData && (
-                                        <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4">
-                                            <p className="font-medium text-blue-900">
-                                                Mã liên kết đã được tạo
-                                            </p>
-
-                                            <p className="mt-2 break-all text-sm text-blue-800">
-                                                {telegramLinkData.link_code}
-                                            </p>
-
-                                            <div className="mt-2 flex items-center gap-2 text-xs text-blue-700">
-                                                <Clock size={14} />
-                                                Hết hạn:{" "}
-                                                {new Date(
-                                                    telegramLinkData.expires_at
-                                                ).toLocaleString("vi-VN")}
-                                            </div>
-
-                                            <button
-                                                type="button"
-                                                onClick={handleOpenTelegram}
-                                                className="mt-4 inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-                                            >
-                                                <Send size={16} />
-                                                Mở Telegram
-                                            </button>
-                                        </div>
-                                    )}
-                                </>
-                            ) : (
-                                <p className="text-sm text-amber-600">
-                                    Bot Telegram hiện đã bị vô hiệu hóa.
-                                </p>
-                            )}
-                        </>
-                    ) : (
-                        <p className="text-sm text-gray-500">
-                            Hộ gia đình chưa cấu hình Telegram Bot.
-                            Vui lòng liên hệ chủ hộ để thiết lập Bot.
-                        </p>
-                    )}
-
-                    {telegramError && (
-                        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600">
-                            {telegramError}
-                        </div>
-                    )}
-
-                    {telegramSuccess && (
-                        <div className="mt-3 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">
-                            {telegramSuccess}
-                        </div>
-                    )}
-                </div>
-            )}
 
             <div className="rounded-xl border border-gray-200 bg-white p-5">
                 <div className="flex items-center gap-3">
@@ -470,18 +517,40 @@ export default function Household() {
                         <Users size={24} />
                     </div>
 
-                    <div>
+                    <div className="flex-1">
                         <h2 className="font-semibold text-gray-900">
-                            {household?.household_name}
+                            Chọn hộ gia đình
                         </h2>
 
                         <p className="text-sm text-gray-500">
-                            Mã hộ gia đình: #{householdId}
+                            Bạn đang tham gia {households.length} hộ gia đình
                         </p>
                     </div>
                 </div>
-            </div>
 
+                <div className="mt-4">
+                    <select
+                        value={householdId || ""}
+                        onChange={(e) => {
+                            const selected = households.find(
+                                (item) => item.id === Number(e.target.value)
+                            );
+
+                            if (selected) {
+                                selectHousehold(selected);
+                            }
+                        }}
+                        className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                        disabled={householdLoading || households.length === 0}
+                    >
+                        {households.map((item) => (
+                            <option key={item.id} value={item.id}>
+                                {item.household_name} (#{item.id})
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            </div>
             {/* Messages */}
             {error && (
                 <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600">
