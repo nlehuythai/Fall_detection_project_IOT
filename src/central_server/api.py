@@ -20,12 +20,13 @@ from src.central_server.main import CentralAIServer
 # Load environment variables
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env")
-
+class CameraResetRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=100)
 
 # Request schema
 class CameraStartRequest(BaseModel):
+    device_id: str = Field(min_length=1, max_length=100)
     stream_url: str = Field(min_length=1, max_length=500)
-
 
 # Initialize Central AI Server
 server = CentralAIServer()
@@ -126,6 +127,7 @@ def start_camera(
     if camera is None:
         added = server.add_camera(
             camera_id=camera_id,
+            device_id=payload.device_id,
             stream_url=payload.stream_url
         )
 
@@ -244,3 +246,34 @@ def stream_camera(camera_id: int):
             "X-Accel-Buffering": "no"
         }
     )
+@app.post(
+    "/internal/cameras/{camera_id}/reset-after-resolved",
+    dependencies=[Depends(verify_internal_api_key)]
+)
+def reset_camera_after_resolved(
+    camera_id: int,
+    payload: CameraResetRequest
+):
+    if camera_id != payload.camera_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Camera ID mismatch"
+        )
+
+    success = server.reset_camera_after_resolved(
+        camera_id=camera_id,
+        event_id=payload.event_id
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=409,
+            detail="Camera or event state mismatch"
+        )
+
+    return {
+        "status": "success",
+        "message": "Camera AI state reset successfully",
+        "camera_id": camera_id,
+        "event_id": payload.event_id
+    }

@@ -66,8 +66,18 @@ function LiveView({ householdId, cameraId, reloadKey, onStatusChange }) {
                 );
 
                 if (!response.ok) {
+                    const errorText = await response.text();
+
+                    console.error("[LIVE VIEW HTTP ERROR]", {
+                        status: response.status,
+                        statusText: response.statusText,
+                        body: errorText,
+                        cameraId,
+                        householdId,
+                    });
+
                     throw new Error(
-                        `HTTP ${response.status}: Không thể kết nối camera`
+                        `HTTP ${response.status}: ${errorText || response.statusText}`
                     );
                 }
 

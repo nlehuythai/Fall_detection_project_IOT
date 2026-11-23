@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
+import os
+import secrets
 
+from fastapi import Header
 from pathlib import Path
 from sqlalchemy.orm import Session
 
@@ -54,6 +57,84 @@ def get_fall_events(
     status_code=status.HTTP_201_CREATED,
     tags=["Device Events"]
 )
+def verify_central_ai_api_key(
+    x_internal_api_key: str = Header(
+        default="",
+        alias="X-Internal-API-Key"
+    )
+):
+    expected_key = os.getenv("CENTRAL_AI_API_KEY")
+
+    if (
+        not expected_key
+        or not secrets.compare_digest(
+            x_internal_api_key,
+            expected_key
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid internal API key"
+        )
+@router.post(
+    "/internal/cameras/{camera_id}/events",
+    response_model=FallEventResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Central AI Events"]
+)
+def create_central_ai_fall_event(
+    camera_id: int,
+    event_data: FallEventCreate,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_central_ai_api_key)
+):
+    # 1. Tìm camera
+    camera = db.query(Camera).filter(
+        Camera.id == camera_id
+    ).first()
+
+    if camera is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found"
+        )
+
+    # 2. Kiểm tra event_id đã tồn tại
+    existing_event = db.query(FallEvent).filter(
+        FallEvent.event_id == event_data.event_id
+    ).first()
+
+    if existing_event:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Event ID already exists"
+        )
+
+    # 3. Tạo sự kiện
+    new_event = FallEvent(
+        event_id=event_data.event_id,
+        household_id=camera.household_id,
+        camera_id=camera.id,
+        occurred_at=event_data.occurred_at,
+        fall_duration_seconds=event_data.fall_duration_seconds,
+        average_confidence=event_data.average_confidence,
+        snapshot_key=event_data.snapshot_key,
+        acknowledged=False
+    )
+
+    db.add(new_event)
+
+    try:
+        db.commit()
+        db.refresh(new_event)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not save fall event"
+        )
+
+    return new_event
 def create_device_fall_event(
     event_data: FallEventCreate,
     db: Session = Depends(get_db),

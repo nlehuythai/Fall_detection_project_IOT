@@ -25,11 +25,12 @@ def get_headers():
     }
 
 
-def start_camera(camera_id: int, stream_url: str):
+def start_camera(camera_id: int, device_id: str,stream_url: str):
     try:
         response = httpx.post(
             f"{CENTRAL_AI_API_URL}/internal/cameras/{camera_id}/start",
             json={
+                "device_id": device_id,
                 "stream_url": stream_url
             },
             headers=get_headers(),

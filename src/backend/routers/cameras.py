@@ -374,6 +374,7 @@ def start_camera_monitoring(
     # 4. Gửi lệnh bật camera đến Central AI Server
     result = start_ai_camera(
         camera_id=camera.id,
+        device_id=camera.device_id,
         stream_url=camera.stream_url
     )
 
